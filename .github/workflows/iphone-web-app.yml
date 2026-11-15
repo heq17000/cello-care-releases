@@ -1,0 +1,90 @@
+name: CELLO CARE web app
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cello-care-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Prepare the web app from the latest signed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re, urllib.request, zipfile
+          from io import BytesIO
+          from pathlib import Path
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          request = urllib.request.Request(
+              f'https://api.github.com/repos/{repo}/releases/latest',
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              release = json.load(response)
+          tag = release['tag_name']
+          if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
+              raise SystemExit('The latest release needs a stable version tag.')
+          filename = f'CELLO-CARE-{tag}.apk'
+          asset, = (asset for asset in release['assets'] if asset['name'] == filename)
+          url = f'https://github.com/{repo}/releases/download/{tag}/{filename}'
+          if asset['browser_download_url'] != url:
+              raise SystemExit('Unexpected release asset URL.')
+          with urllib.request.urlopen(url, timeout=60) as response:
+              apk = response.read(48 * 1024 * 1024 + 1)
+          if len(apk) != asset['size'] or len(apk) > 48 * 1024 * 1024:
+              raise SystemExit('The APK download is incomplete or too large.')
+          digest = 'sha256:' + hashlib.sha256(apk).hexdigest()
+          if asset.get('digest') and asset['digest'] != digest:
+              raise SystemExit('Release asset digest mismatch.')
+
+          site = Path('_site')
+          assets = (
+              'index.html', 'styles.css', 'program.js', 'guide.js', 'records.js', 'app.js', 'install.js',
+              'manifest.webmanifest', 'guides/upper.png', 'guides/floor.png', 'guides/recovery.png',
+              'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png',
+          )
+          with zipfile.ZipFile(BytesIO(apk)) as archive:
+              for item in assets:
+                  destination = site / item
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  destination.write_bytes(archive.read('assets/web/' + item))
+          worker = Path('sw.js').read_text(encoding='utf-8')
+          worker, count = re.subn(r'(const cacheName = `\$\{cachePrefix\})[^`]+`;',
+                                  lambda m: m[1] + tag[1:] + '`;', worker, count=1)
+          if count != 1:
+              raise SystemExit('The service worker cache version was not found.')
+          (site / 'sw.js').write_text(worker, encoding='utf-8')
+          print(f'Prepared {tag} with {len(assets)} static assets.')
+          PY
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy the web app
+        id: deployment
+        uses: actions/deploy-pages@v4
