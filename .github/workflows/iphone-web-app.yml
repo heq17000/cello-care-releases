@@ -59,11 +59,19 @@ jobs:
               'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png',
           )
           with zipfile.ZipFile(BytesIO(apk)) as archive:
-              for item in assets:
+              bundled = set(archive.namelist())
+              additional = ('guides/cello-care-decor.png', 'guides/cold-pack-decor.png', 'icons/material-symbols.woff2', 'icons/material-symbols-LICENSE.txt')
+              for item in assets + tuple(item for item in additional if 'assets/web/' + item in bundled):
                   destination = site / item
                   destination.parent.mkdir(parents=True, exist_ok=True)
                   destination.write_bytes(archive.read('assets/web/' + item))
-          worker = Path('sw.js').read_text(encoding='utf-8')
+              if 'assets/web/sw.js' in bundled:
+                  worker = archive.read('assets/web/sw.js').decode('utf-8')
+              else:
+                  worker = Path('sw.js').read_text(encoding='utf-8')
+                  for item in additional:
+                      if 'assets/web/' + item not in bundled:
+                          worker = worker.replace("'" + item + "', ", "").replace(", '" + item + "'", "")
           worker, count = re.subn(r'(const cacheName = `\$\{cachePrefix\})[^`]+`;',
                                   lambda m: m[1] + tag[1:] + '`;', worker, count=1)
           if count != 1:
